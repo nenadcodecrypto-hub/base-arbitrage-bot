@@ -46,6 +46,7 @@ const config = {
   // RPC Configuration
   rpc: {
     baseUrl: getRequiredEnv("BASE_RPC_URL", "Base mainnet RPC endpoint"),
+    baseWssUrl: getRequiredEnv("BASE_WSS_URL", "Base mainnet WebSocket endpoint"),
   },
 
   // Token Configuration
@@ -82,6 +83,12 @@ const config = {
         "Aerodrome Slipstream cbBTC/USDC pool address"
       ),
     },
+    pancakeV3: {
+      cbBTC_USDC: getRequiredEnv(
+        "PANCAKE_V3_POOL_ADDRESS",
+        "PancakeSwap V3 cbBTC/USDC pool address on Base"
+      ),
+    },
   },
 
   // Monitoring Thresholds
@@ -112,6 +119,14 @@ const config = {
       getOptionalEnv("AERODROME_FEE_BPS", "1"),
       "AERODROME_FEE_BPS"
     ),
+    pancakeGasFeeUSDC: parseFloatSafe(
+      getOptionalEnv("PANCAKE_GAS_FEE_USDC", "0.004"),
+      "PANCAKE_GAS_FEE_USDC"
+    ),
+    pancakeFixedFeeUSDC: parseFloatSafe(
+      getOptionalEnv("PANCAKE_FIXED_FEE_USDC", "0.05"),
+      "PANCAKE_FIXED_FEE_USDC"
+    ),
   },
 
   // Arbitrage Simulation Configuration
@@ -131,10 +146,11 @@ console.log(`   ${config.tokens.cbBTC.symbol}: ${config.tokens.cbBTC.address} ($
 console.log(`   ${config.tokens.USDC.symbol}: ${config.tokens.USDC.address} (${config.tokens.USDC.decimals} decimals)`);
 console.log(`   Uniswap Pool: ${config.pools.uniswap.cbBTC_USDC}`);
 console.log(`   Aerodrome Pool: ${config.pools.aerodrome.cbBTC_USDC}`);
+console.log(`   PancakeSwap V3 Pool: ${config.pools.pancakeV3.cbBTC_USDC}`);
 console.log(`   Price Change Threshold: $${config.thresholds.priceChange}`);
 console.log(`   Uniswap Gas Fee: $${config.costs.uniswapGasFeeUSDC} USDC`);
-console.log(`   Aerodrome Gas Fee: $${config.costs.aerodromeGasFeeUSDC} USDC`);
-console.log(`   Aerodrome Trade Fee: ${config.costs.aerodromeFeeBps} bps (${(config.costs.aerodromeFeeBps / 100).toFixed(2)}%)`);
+console.log(`   Aerodrome Gas Fee: $${config.costs.aerodromeGasFeeUSDC} USDC (Fee: ${config.costs.aerodromeFeeBps} bps)`);
+console.log(`   PancakeSwap Gas Fee: $${config.costs.pancakeGasFeeUSDC} USDC (Fixed Fee: $${config.costs.pancakeFixedFeeUSDC} USDC)`);
 console.log(`   Arb Trade Size: ${config.arbitrage.tradeSizeCbBTC} cbBTC`);
 console.log();
 

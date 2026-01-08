@@ -3,18 +3,19 @@ import config from "./config.js";
 
 /**
  * ╔══════════════════════════════════════════════════════════════════════════════╗
- * ║   DUAL DEX PRICE MONITOR: Uniswap V3 + Aerodrome Slipstream (Base)          ║
- * ║   Monitors cbBTC/USDC pair on both DEXes and calculates spreads             ║
+ * ║   TRIPLE DEX PRICE MONITOR: Uniswap V3 + Aerodrome + PancakeSwap V3 (Base)  ║
+ * ║   Monitors cbBTC/USDC pair on three DEXes and calculates spreads             ║
  * ╚══════════════════════════════════════════════════════════════════════════════╝
  * 
- * This script monitors the cbBTC/USDC price on two DEXes on Base.
+ * This script monitors the cbBTC/USDC price on three DEXes on Base.
  * All configuration is loaded from environment variables via config.js
  * 
  * Features:
- * - Real-time price monitoring via Swap events on both DEXes
+ * - Real-time price monitoring via Swap events on all three DEXes
  * - Automatic token ordering detection (handles token0/token1 variations)
  * - High-precision BigInt calculations for accurate pricing
- * - Spread calculation showing arbitrage opportunities
+ * - Pairwise spread calculation across all DEX combinations
+ * - Arbitrage simulation for the best spread (fee and gas adjusted)
  * - Formatted logging with timestamps and transaction hashes
  * - Fully configurable via .env file
  * 
@@ -22,7 +23,7 @@ import config from "./config.js";
  * - BASE_RPC_URL: RPC endpoint for Base blockchain
  * - CB_BTC_ADDRESS, USDC_ADDRESS: Token addresses
  * - CB_BTC_DECIMALS, USDC_DECIMALS: Token decimals
- * - UNISWAP_POOL_ADDRESS, AERODROME_POOL_ADDRESS: Pool addresses
+ * - UNISWAP_POOL_ADDRESS, AERODROME_POOL_ADDRESS, PANCAKE_V3_POOL_ADDRESS: Pool addresses
  * - PRICE_CHANGE_THRESHOLD: Minimum price change to log
  */
 
@@ -145,67 +146,76 @@ function formatSpread(spread) {
 // ===== FEE & GAS HELPERS =====
 
 /**
- * Apply Aerodrome percentage trade fee to a USDC amount
+ * Get fee and gas information for a DEX
+ * @param {string} dexName - DEX name ("Uniswap", "Aerodrome", "PancakeSwap")
+ * @returns {Object} { feeBps, gasFeeUSDC } or { fixedFeeUSDC, gasFeeUSDC } for PancakeSwap
+ */
+function getDexCostModel(dexName) {
+  switch (dexName) {
+    case "Uniswap":
+      return { feeBps: 0, gasFeeUSDC: config.costs.uniswapGasFeeUSDC };
+    case "Aerodrome":
+      return { feeBps: config.costs.aerodromeFeeBps, gasFeeUSDC: config.costs.aerodromeGasFeeUSDC };
+    case "PancakeSwap":
+      return { fixedFeeUSDC: config.costs.pancakeFixedFeeUSDC, gasFeeUSDC: config.costs.pancakeGasFeeUSDC };
+    default:
+      throw new Error(`Unknown DEX: ${dexName}`);
+  }
+}
+
+/**
+ * Apply a DEX's trade fee to a USDC amount
  * @param {number} amountUSDC - USDC notional of the trade
  * @param {number} feeBps - Fee in basis points (1 bps = 0.01%)
  * @returns {number} Amount after fee deduction
  */
-function applyAerodromeTradeFeeUSDC(amountUSDC, feeBps) {
+function applyTradeFeeUSDC(amountUSDC, feeBps) {
+  if (feeBps === 0) return amountUSDC;
   return amountUSDC * (1 - feeBps / 10_000);
 }
 
 /**
  * Calculate total gas cost for an arbitrage direction
- * @param {string} buyDex - "Uniswap" or "Aerodrome"
- * @param {string} sellDex - "Uniswap" or "Aerodrome"
+ * @param {string} buyDex - DEX where cbBTC is bought
+ * @param {string} sellDex - DEX where cbBTC is sold
  * @returns {number} Total gas cost in USDC
  */
 function totalGasCostForDirection(buyDex, sellDex) {
-  let total = 0;
-  if (buyDex === "Uniswap" || sellDex === "Uniswap") {
-    total += config.costs.uniswapGasFeeUSDC;
-  }
-  if (buyDex === "Aerodrome" || sellDex === "Aerodrome") {
-    total += config.costs.aerodromeGasFeeUSDC;
-  }
-  return total;
+  const buyGas = getDexCostModel(buyDex).gasFeeUSDC;
+  const sellGas = getDexCostModel(sellDex).gasFeeUSDC;
+  return buyGas + sellGas;
 }
 
 // ===== ARBITRAGE SIMULATION =====
 
 /**
- * Simulate arbitrage opportunity between two DEXes
- * @param {number} uniswapPrice - Current Uniswap cbBTC price in USDC
- * @param {number} aerodromePrice - Current Aerodrome cbBTC price in USDC
- * @returns {Object} Arbitrage simulation result
+ * Simulate arbitrage between any two DEXes
+ * @param {string} dex1Name - First DEX ("Uniswap", "Aerodrome", "PancakeSwap")
+ * @param {number} dex1Price - cbBTC price on DEX1 (USDC per cbBTC)
+ * @param {string} dex2Name - Second DEX
+ * @param {number} dex2Price - cbBTC price on DEX2 (USDC per cbBTC)
+ * @returns {Object} Best arbitrage direction
  */
-function simulateArbitrage(uniswapPrice, aerodromePrice) {
+function simulateArbitrageForPair(dex1Name, dex1Price, dex2Name, dex2Price) {
   const tradeSizeCbBTC = config.arbitrage.tradeSizeCbBTC;
-  const aeroFeeBps = config.costs.aerodromeFeeBps;
   
-  // Direction A: Buy on Uniswap (no trade fee), Sell on Aerodrome (percent fee)
-  const directionA = calculateArbDirection(
-    {
-      buyDex: "Uniswap",
-      sellDex: "Aerodrome",
-      buyPrice: uniswapPrice,
-      sellPrice: aerodromePrice,
-      tradeSizeCbBTC,
-      aerodromeFeeBps: aeroFeeBps,
-    }
-  );
+  // Direction A: Buy on DEX1, Sell on DEX2
+  const directionA = calculateArbDirection({
+    buyDex: dex1Name,
+    sellDex: dex2Name,
+    buyPrice: dex1Price,
+    sellPrice: dex2Price,
+    tradeSizeCbBTC,
+  });
   
-  // Direction B: Buy on Aerodrome (percent fee), Sell on Uniswap (no trade fee)
-  const directionB = calculateArbDirection(
-    {
-      buyDex: "Aerodrome",
-      sellDex: "Uniswap",
-      buyPrice: aerodromePrice,
-      sellPrice: uniswapPrice,
-      tradeSizeCbBTC,
-      aerodromeFeeBps: aeroFeeBps,
-    }
-  );
+  // Direction B: Buy on DEX2, Sell on DEX1
+  const directionB = calculateArbDirection({
+    buyDex: dex2Name,
+    sellDex: dex1Name,
+    buyPrice: dex2Price,
+    sellPrice: dex1Price,
+    tradeSizeCbBTC,
+  });
   
   return directionA.netProfitUSDC > directionB.netProfitUSDC ? directionA : directionB;
 }
@@ -218,7 +228,6 @@ function simulateArbitrage(uniswapPrice, aerodromePrice) {
  * @param {number} params.buyPrice - Buy price (USDC per cbBTC)
  * @param {number} params.sellPrice - Sell price (USDC per cbBTC)
  * @param {number} params.tradeSizeCbBTC - cbBTC trade size
- * @param {number} params.aerodromeFeeBps - Aerodrome fee in bps (only applied on Aerodrome trades)
  * @returns {Object} Calculation result
  */
 function calculateArbDirection({
@@ -227,19 +236,39 @@ function calculateArbDirection({
   buyPrice,
   sellPrice,
   tradeSizeCbBTC,
-  aerodromeFeeBps,
 }) {
+  const buyModel = getDexCostModel(buyDex);
+  const sellModel = getDexCostModel(sellDex);
+  
   // Buy leg
   const usdcSpentBeforeFee = tradeSizeCbBTC * buyPrice;
-  const usdcSpentAfterFee = buyDex === "Aerodrome"
-    ? usdcSpentBeforeFee * (1 + aerodromeFeeBps / 10_000)
-    : usdcSpentBeforeFee; // Uniswap buy has no trade fee
+  let usdcSpentAfterFee;
+  let buyTradeFeesUSDC = 0;
+  
+  if (buyModel.fixedFeeUSDC !== undefined) {
+    // PancakeSwap: fixed fee
+    usdcSpentAfterFee = usdcSpentBeforeFee + buyModel.fixedFeeUSDC;
+    buyTradeFeesUSDC = buyModel.fixedFeeUSDC;
+  } else {
+    // Uniswap/Aerodrome: percentage fee
+    buyTradeFeesUSDC = usdcSpentBeforeFee * (buyModel.feeBps / 10_000);
+    usdcSpentAfterFee = usdcSpentBeforeFee + buyTradeFeesUSDC;
+  }
   
   // Sell leg
   const usdcReceivedBeforeFee = tradeSizeCbBTC * sellPrice;
-  const usdcReceivedAfterFee = sellDex === "Aerodrome"
-    ? applyAerodromeTradeFeeUSDC(usdcReceivedBeforeFee, aerodromeFeeBps)
-    : usdcReceivedBeforeFee; // Uniswap sell has no trade fee
+  let usdcReceivedAfterFee;
+  let sellTradeFeesUSDC = 0;
+  
+  if (sellModel.fixedFeeUSDC !== undefined) {
+    // PancakeSwap: fixed fee (deducted from revenue)
+    usdcReceivedAfterFee = usdcReceivedBeforeFee - sellModel.fixedFeeUSDC;
+    sellTradeFeesUSDC = sellModel.fixedFeeUSDC;
+  } else {
+    // Uniswap/Aerodrome: percentage fee
+    sellTradeFeesUSDC = usdcReceivedBeforeFee * (sellModel.feeBps / 10_000);
+    usdcReceivedAfterFee = usdcReceivedBeforeFee - sellTradeFeesUSDC;
+  }
   
   // Gas costs
   const totalGasCostUSDC = totalGasCostForDirection(buyDex, sellDex);
@@ -264,7 +293,12 @@ function calculateArbDirection({
       usdcSpentAfterFee,
       usdcReceivedBeforeFee,
       usdcReceivedAfterFee,
-      aerodromeFeeBps,
+      buyDexName: buyDex,
+      sellDexName: sellDex,
+      buyModel,
+      sellModel,
+      buyTradeFeesUSDC,
+      sellTradeFeesUSDC,
       totalGasCostUSDC,
     },
   };
@@ -272,14 +306,27 @@ function calculateArbDirection({
 
 /**
  * Log arbitrage opportunity in a formatted way
- * @param {Object} arbResult - Result from simulateArbitrage()
+ * @param {Object} arbResult - Result from calculateArbDirection()
  */
 function logArbitrageOpportunity(arbResult) {
   const d = arbResult.details;
   
-  const aeroFeeApplied = d.aerodromeFeeBps > 0;
-  const aeroFeeLabel = `${d.aerodromeFeeBps} bps`;
-  const totalFees = d.usdcSpentAfterFee - d.usdcSpentBeforeFee + (d.usdcReceivedBeforeFee - d.usdcReceivedAfterFee);
+  // Build fee labels for both buy and sell legs
+  let buyFeeLabel = "";
+  if (d.buyModel.fixedFeeUSDC !== undefined) {
+    buyFeeLabel = `$${d.buyModel.fixedFeeUSDC.toFixed(4)} (fixed)`;
+  } else if (d.buyModel.feeBps > 0) {
+    buyFeeLabel = `${d.buyModel.feeBps} bps`;
+  }
+  
+  let sellFeeLabel = "";
+  if (d.sellModel.fixedFeeUSDC !== undefined) {
+    sellFeeLabel = `$${d.sellModel.fixedFeeUSDC.toFixed(4)} (fixed)`;
+  } else if (d.sellModel.feeBps > 0) {
+    sellFeeLabel = `${d.sellModel.feeBps} bps`;
+  }
+  
+  const totalFees = d.buyTradeFeesUSDC + d.sellTradeFeesUSDC;
   const spread = d.usdcReceivedBeforeFee - d.usdcSpentBeforeFee;
   
   if (!arbResult.isProfitable) {
@@ -295,19 +342,19 @@ function logArbitrageOpportunity(arbResult) {
   console.log(`📊 Trade Size: ${d.tradeSizeCbBTC} cbBTC`);
   console.log(`💵 Net Profit: $${arbResult.netProfitUSDC.toFixed(2)} USDC (${arbResult.netProfitPct.toFixed(3)}%)`);
   console.log();
-  console.log("📋 BUY LEG - " + arbResult.buyDex + ":");
+  console.log("📋 BUY LEG - " + d.buyDexName + ":");
   console.log(`   Price: $${d.buyPrice.toFixed(2)} per cbBTC`);
   console.log(`   Cost before fee: $${d.usdcSpentBeforeFee.toFixed(2)}`);
-  if (arbResult.buyDex === "Aerodrome" && aeroFeeApplied) {
-    console.log(`   Aerodrome Fee: ${aeroFeeLabel}`);
+  if (buyFeeLabel) {
+    console.log(`   Trade Fee: ${buyFeeLabel}`);
   }
   console.log(`   ✅ Total USDC Spent: $${d.usdcSpentAfterFee.toFixed(2)}`);
   console.log();
-  console.log("📋 SELL LEG - " + arbResult.sellDex + ":");
+  console.log("📋 SELL LEG - " + d.sellDexName + ":");
   console.log(`   Price: $${d.sellPrice.toFixed(2)} per cbBTC`);
   console.log(`   Revenue before fee: $${d.usdcReceivedBeforeFee.toFixed(2)}`);
-  if (arbResult.sellDex === "Aerodrome" && aeroFeeApplied) {
-    console.log(`   Aerodrome Fee: ${aeroFeeLabel}`);
+  if (sellFeeLabel) {
+    console.log(`   Trade Fee: ${sellFeeLabel}`);
   }
   console.log(`   ✅ Total USDC Received: $${d.usdcReceivedAfterFee.toFixed(2)}`);
   console.log();
@@ -321,12 +368,12 @@ function logArbitrageOpportunity(arbResult) {
 
 // ===== MAIN MONITORING LOGIC =====
 async function monitorPool() {
-  console.log("🚀 Starting Dual DEX cbBTC/USDC Price Monitor on Base");
-  console.log("   📊 Uniswap V3 + Aerodrome Slipstream\n");
+  console.log("🚀 Starting Triple DEX cbBTC/USDC Price Monitor on Base");
+  console.log("   📊 Uniswap V3 + Aerodrome Slipstream + PancakeSwap V3\n");
   
-  // Connect to Base mainnet using RPC URL from config
-  const provider = new ethers.JsonRpcProvider(config.rpc.baseUrl);
-  console.log(`📡 Connected to Base RPC: ${config.rpc.baseUrl}\n`);
+  // Connect to Base mainnet using WebSocket for real-time events
+  const provider = new ethers.WebSocketProvider(config.rpc.baseWssUrl);
+  console.log(`📡 Connected to Base WSS: ${config.rpc.baseWssUrl}\n`);
   
   // ===== UNISWAP V3 INITIALIZATION =====
   console.log("=" .repeat(80));
@@ -340,8 +387,10 @@ async function monitorPool() {
   // Variables to track prices
   let lastUniswapPrice = 0;
   let lastAerodromePrice = 0;
+  let lastPancakePrice = 0;
   let uniswapIsInverted = false;
   let aerodromeIsInverted = false;
+  let pancakeIsInverted = false;
   
   try {
     // ===== UNISWAP V3 SETUP =====
@@ -394,15 +443,61 @@ async function monitorPool() {
     // Extract sqrtPriceX96 from slot0 return value (same structure as Uniswap V3)
     lastAerodromePrice = calculateAerodromePrice(aeroSlot0.sqrtPriceX96, aerodromeIsInverted);
     
-    console.log(`💰 Initial Aerodrome Slipstream Price: 1 cbBTC = ${formatPrice(lastAerodromePrice)} USDC`);
+    console.log(`💰 Initial Aerodrome Slipstream Price: 1 cbBTC = ${formatPrice(lastAerodromePrice)} USDC\n`);
     
-    // Calculate initial spread
-    const initialSpread = calculateSpread(lastAerodromePrice, lastUniswapPrice);
-    console.log(`📊 Initial Spread (Aerodrome vs Uniswap): ${formatSpread(initialSpread)}\n`);
+    // ===== PANCAKESWAP V3 INITIALIZATION =====
+    console.log("=".repeat(80));
+    console.log("🥞 PANCAKESWAP V3 INITIALIZATION");
+    console.log("=".repeat(80));
+    console.log(`📍 Pool Address: ${config.pools.pancakeV3.cbBTC_USDC}\n`);
     
-    // Simulate initial arbitrage opportunity
+    // Create PancakeSwap V3 pool contract (using Uniswap V3 compatible ABI)
+    const pancakePool = new ethers.Contract(config.pools.pancakeV3.cbBTC_USDC, UNISWAP_POOL_ABI, provider);
+    
+    // Detect PancakeSwap token ordering
+    console.log("🔍 Detecting token ordering...");
+    const pancakeToken0 = await pancakePool.token0();
+    const pancakeToken1 = await pancakePool.token1();
+    
+    pancakeIsInverted = pancakeToken0.toLowerCase() === config.tokens.USDC.address.toLowerCase();
+    
+    console.log(`   Token0: ${pancakeToken0}`);
+    console.log(`   Token1: ${pancakeToken1}`);
+    console.log(`   cbBTC is: ${pancakeIsInverted ? 'token1' : 'token0'}`);
+    console.log(`   USDC is: ${pancakeIsInverted ? 'token0' : 'token1'}\n`);
+    
+    // Get initial PancakeSwap price
+    console.log("📊 Reading initial price from PancakeSwap V3...");
+    const pancakeSlot0 = await pancakePool.slot0();
+    lastPancakePrice = calculatePrice(pancakeSlot0.sqrtPriceX96, pancakeIsInverted);
+    
+    console.log(`💰 Initial PancakeSwap V3 Price: 1 cbBTC = ${formatPrice(lastPancakePrice)} USDC\n`);
+    
+    // ===== INITIAL SPREAD ANALYSIS =====
+    console.log("=".repeat(80));
+    console.log("📊 INITIAL SPREAD ANALYSIS");
+    console.log("=".repeat(80));
+    const spreadUniAero = calculateSpread(lastAerodromePrice, lastUniswapPrice);
+    const spreadUniPancake = calculateSpread(lastPancakePrice, lastUniswapPrice);
+    const spreadAeroPancake = calculateSpread(lastPancakePrice, lastAerodromePrice);
+    
+    console.log(`Uniswap vs Aerodrome: ${formatSpread(spreadUniAero)}`);
+    console.log(`Uniswap vs PancakeSwap: ${formatSpread(spreadUniPancake)}`);
+    console.log(`Aerodrome vs PancakeSwap: ${formatSpread(spreadAeroPancake)}`);
+    
+    // Find biggest spread
+    const spreads = [
+      { dex1: "Uniswap", dex2: "Aerodrome", spread: Math.abs(spreadUniAero), price1: lastUniswapPrice, price2: lastAerodromePrice },
+      { dex1: "Uniswap", dex2: "PancakeSwap", spread: Math.abs(spreadUniPancake), price1: lastUniswapPrice, price2: lastPancakePrice },
+      { dex1: "Aerodrome", dex2: "PancakeSwap", spread: Math.abs(spreadAeroPancake), price1: lastAerodromePrice, price2: lastPancakePrice },
+    ];
+    const maxSpreadPair = spreads.reduce((max, curr) => curr.spread > max.spread ? curr : max);
+    
+    console.log(`\n📈 Biggest spread: ${maxSpreadPair.dex1} vs ${maxSpreadPair.dex2} (${formatSpread(maxSpreadPair.spread)})\n`);
+    
+    // Simulate initial arbitrage for best pair
     console.log("🔍 Checking initial arbitrage opportunity...");
-    const initialArbResult = simulateArbitrage(lastUniswapPrice, lastAerodromePrice);
+    const initialArbResult = simulateArbitrageForPair(maxSpreadPair.dex1, maxSpreadPair.price1, maxSpreadPair.dex2, maxSpreadPair.price2);
     logArbitrageOpportunity(initialArbResult);
     
     console.log("=".repeat(80));
@@ -410,31 +505,45 @@ async function monitorPool() {
     console.log("=".repeat(80));
     console.log();
     
+    // ===== HELPER FUNCTION: Find and simulate best spread =====
+    const findAndSimulateBestSpread = () => {
+      const spreadUniAero = calculateSpread(lastAerodromePrice, lastUniswapPrice);
+      const spreadUniPancake = calculateSpread(lastPancakePrice, lastUniswapPrice);
+      const spreadAeroPancake = calculateSpread(lastPancakePrice, lastAerodromePrice);
+      
+      const spreads = [
+        { dex1: "Uniswap", dex2: "Aerodrome", spread: Math.abs(spreadUniAero), price1: lastUniswapPrice, price2: lastAerodromePrice },
+        { dex1: "Uniswap", dex2: "PancakeSwap", spread: Math.abs(spreadUniPancake), price1: lastUniswapPrice, price2: lastPancakePrice },
+        { dex1: "Aerodrome", dex2: "PancakeSwap", spread: Math.abs(spreadAeroPancake), price1: lastAerodromePrice, price2: lastPancakePrice },
+      ];
+      const maxSpreadPair = spreads.reduce((max, curr) => curr.spread > max.spread ? curr : max);
+      
+      console.log(`📈 Max spread: ${maxSpreadPair.dex1} vs ${maxSpreadPair.dex2} (${formatSpread(maxSpreadPair.spread)})`);
+      
+      // Simulate arbitrage for best pair
+      const arbResult = simulateArbitrageForPair(maxSpreadPair.dex1, maxSpreadPair.price1, maxSpreadPair.dex2, maxSpreadPair.price2);
+      logArbitrageOpportunity(arbResult);
+    };
+    
     // ===== UNISWAP V3 EVENT LISTENER =====
     uniswapPool.on("Swap", async (sender, recipient, amount0, amount1, sqrtPriceX96, liquidity, tick, event) => {
       try {
-        // Re-read slot0 to get the latest price
-        const slot0 = await uniswapPool.slot0();
-        const newPrice = calculatePrice(slot0.sqrtPriceX96, uniswapIsInverted);
+        // Compute price directly from the event's sqrtPriceX96 argument
+        const newPrice = calculatePrice(sqrtPriceX96, uniswapIsInverted);
         
         // Only log if price changed significantly (threshold from config)
         if (Math.abs(newPrice - lastUniswapPrice) > config.thresholds.priceChange) {
           const priceChange = ((newPrice - lastUniswapPrice) / lastUniswapPrice) * 100;
           const changeSymbol = priceChange >= 0 ? "📈" : "📉";
-          const spread = calculateSpread(lastAerodromePrice, newPrice);
           
           console.log(`[${new Date().toLocaleTimeString()}] ${changeSymbol} UNISWAP V3 Price Update`);
           console.log(`   Price: 1 cbBTC = ${formatPrice(newPrice)} USDC`);
           console.log(`   Change: ${priceChange >= 0 ? "+" : ""}${priceChange.toFixed(3)}%`);
-          console.log(`   Spread vs Aerodrome: ${formatSpread(spread)}`);
           console.log(`   Tx: ${event.log.transactionHash}`);
           console.log("─".repeat(80));
           
           lastUniswapPrice = newPrice;
-          
-          // Simulate arbitrage opportunity
-          const arbResult = simulateArbitrage(newPrice, lastAerodromePrice);
-          logArbitrageOpportunity(arbResult);
+          findAndSimulateBestSpread();
         }
       } catch (error) {
         console.error("❌ Error processing Uniswap swap event:", error.message);
@@ -442,36 +551,52 @@ async function monitorPool() {
     });
     
     // ===== AERODROME SLIPSTREAM EVENT LISTENER =====
-    // Swap event has the same signature as Uniswap V3 (confirmed from ABI):
-    // event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)
     aerodromePool.on("Swap", async (sender, recipient, amount0, amount1, sqrtPriceX96, liquidity, tick, event) => {
       try {
-        // Re-read the price state using slot0() (same as Uniswap V3)
-        const slot0 = await aerodromePool.slot0();
-        // Extract sqrtPriceX96 from the slot0 return structure
-        const newPrice = calculateAerodromePrice(slot0.sqrtPriceX96, aerodromeIsInverted);
+        // Compute price directly from the event's sqrtPriceX96 argument
+        const newPrice = calculateAerodromePrice(sqrtPriceX96, aerodromeIsInverted);
         
         // Only log if price changed significantly (threshold from config)
         if (Math.abs(newPrice - lastAerodromePrice) > config.thresholds.priceChange) {
           const priceChange = ((newPrice - lastAerodromePrice) / lastAerodromePrice) * 100;
           const changeSymbol = priceChange >= 0 ? "📈" : "📉";
-          const spread = calculateSpread(newPrice, lastUniswapPrice);
           
           console.log(`[${new Date().toLocaleTimeString()}] ${changeSymbol} AERODROME SLIPSTREAM Price Update`);
           console.log(`   Price: 1 cbBTC = ${formatPrice(newPrice)} USDC`);
           console.log(`   Change: ${priceChange >= 0 ? "+" : ""}${priceChange.toFixed(3)}%`);
-          console.log(`   Spread vs Uniswap: ${formatSpread(spread)}`);
           console.log(`   Tx: ${event.log.transactionHash}`);
           console.log("─".repeat(80));
           
           lastAerodromePrice = newPrice;
-          
-          // Simulate arbitrage opportunity
-          const arbResult = simulateArbitrage(lastUniswapPrice, newPrice);
-          logArbitrageOpportunity(arbResult);
+          findAndSimulateBestSpread();
         }
       } catch (error) {
         console.error("❌ Error processing Aerodrome swap event:", error.message);
+      }
+    });
+    
+    // ===== PANCAKESWAP V3 EVENT LISTENER =====
+    pancakePool.on("Swap", async (sender, recipient, amount0, amount1, sqrtPriceX96, liquidity, tick, event) => {
+      try {
+        // Compute price directly from the event's sqrtPriceX96 argument
+        const newPrice = calculatePrice(sqrtPriceX96, pancakeIsInverted);
+        
+        // Only log if price changed significantly (threshold from config)
+        if (Math.abs(newPrice - lastPancakePrice) > config.thresholds.priceChange) {
+          const priceChange = ((newPrice - lastPancakePrice) / lastPancakePrice) * 100;
+          const changeSymbol = priceChange >= 0 ? "📈" : "📉";
+          
+          console.log(`[${new Date().toLocaleTimeString()}] ${changeSymbol} PANCAKESWAP V3 Price Update`);
+          console.log(`   Price: 1 cbBTC = ${formatPrice(newPrice)} USDC`);
+          console.log(`   Change: ${priceChange >= 0 ? "+" : ""}${priceChange.toFixed(3)}%`);
+          console.log(`   Tx: ${event.log.transactionHash}`);
+          console.log("─".repeat(80));
+          
+          lastPancakePrice = newPrice;
+          findAndSimulateBestSpread();
+        }
+      } catch (error) {
+        console.error("❌ Error processing PancakeSwap swap event:", error.message);
       }
     });
     
