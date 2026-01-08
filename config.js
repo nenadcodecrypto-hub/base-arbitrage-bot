@@ -97,6 +97,31 @@ const config = {
       "SPREAD_LOG_THRESHOLD"
     ),
   },
+
+  // Cost Model Configuration
+  costs: {
+    uniswapGasFeeUSDC: parseFloatSafe(
+      getOptionalEnv("UNISWAP_GAS_FEE_USDC", "0.004"),
+      "UNISWAP_GAS_FEE_USDC"
+    ),
+    aerodromeGasFeeUSDC: parseFloatSafe(
+      getOptionalEnv("AERODROME_GAS_FEE_USDC", "0.005"),
+      "AERODROME_GAS_FEE_USDC"
+    ),
+    aerodromeFeeBps: parseFloatSafe(
+      getOptionalEnv("AERODROME_FEE_BPS", "1"),
+      "AERODROME_FEE_BPS"
+    ),
+  },
+
+  // Arbitrage Simulation Configuration
+  arbitrage: {
+    // Trade size for simulation (in cbBTC)
+    tradeSizeCbBTC: parseFloatSafe(
+      getOptionalEnv("ARB_TRADE_SIZE_CBBTC", "0.1"),
+      "ARB_TRADE_SIZE_CBBTC"
+    ),
+  },
 };
 
 // Validate configuration
@@ -107,6 +132,10 @@ console.log(`   ${config.tokens.USDC.symbol}: ${config.tokens.USDC.address} (${c
 console.log(`   Uniswap Pool: ${config.pools.uniswap.cbBTC_USDC}`);
 console.log(`   Aerodrome Pool: ${config.pools.aerodrome.cbBTC_USDC}`);
 console.log(`   Price Change Threshold: $${config.thresholds.priceChange}`);
+console.log(`   Uniswap Gas Fee: $${config.costs.uniswapGasFeeUSDC} USDC`);
+console.log(`   Aerodrome Gas Fee: $${config.costs.aerodromeGasFeeUSDC} USDC`);
+console.log(`   Aerodrome Trade Fee: ${config.costs.aerodromeFeeBps} bps (${(config.costs.aerodromeFeeBps / 100).toFixed(2)}%)`);
+console.log(`   Arb Trade Size: ${config.arbitrage.tradeSizeCbBTC} cbBTC`);
 console.log();
 
 export default config;

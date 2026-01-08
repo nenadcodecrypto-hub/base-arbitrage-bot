@@ -142,6 +142,183 @@ function formatSpread(spread) {
   return `${sign}${spread.toFixed(3)}%`;
 }
 
+// ===== FEE & GAS HELPERS =====
+
+/**
+ * Apply Aerodrome percentage trade fee to a USDC amount
+ * @param {number} amountUSDC - USDC notional of the trade
+ * @param {number} feeBps - Fee in basis points (1 bps = 0.01%)
+ * @returns {number} Amount after fee deduction
+ */
+function applyAerodromeTradeFeeUSDC(amountUSDC, feeBps) {
+  return amountUSDC * (1 - feeBps / 10_000);
+}
+
+/**
+ * Calculate total gas cost for an arbitrage direction
+ * @param {string} buyDex - "Uniswap" or "Aerodrome"
+ * @param {string} sellDex - "Uniswap" or "Aerodrome"
+ * @returns {number} Total gas cost in USDC
+ */
+function totalGasCostForDirection(buyDex, sellDex) {
+  let total = 0;
+  if (buyDex === "Uniswap" || sellDex === "Uniswap") {
+    total += config.costs.uniswapGasFeeUSDC;
+  }
+  if (buyDex === "Aerodrome" || sellDex === "Aerodrome") {
+    total += config.costs.aerodromeGasFeeUSDC;
+  }
+  return total;
+}
+
+// ===== ARBITRAGE SIMULATION =====
+
+/**
+ * Simulate arbitrage opportunity between two DEXes
+ * @param {number} uniswapPrice - Current Uniswap cbBTC price in USDC
+ * @param {number} aerodromePrice - Current Aerodrome cbBTC price in USDC
+ * @returns {Object} Arbitrage simulation result
+ */
+function simulateArbitrage(uniswapPrice, aerodromePrice) {
+  const tradeSizeCbBTC = config.arbitrage.tradeSizeCbBTC;
+  const aeroFeeBps = config.costs.aerodromeFeeBps;
+  
+  // Direction A: Buy on Uniswap (no trade fee), Sell on Aerodrome (percent fee)
+  const directionA = calculateArbDirection(
+    {
+      buyDex: "Uniswap",
+      sellDex: "Aerodrome",
+      buyPrice: uniswapPrice,
+      sellPrice: aerodromePrice,
+      tradeSizeCbBTC,
+      aerodromeFeeBps: aeroFeeBps,
+    }
+  );
+  
+  // Direction B: Buy on Aerodrome (percent fee), Sell on Uniswap (no trade fee)
+  const directionB = calculateArbDirection(
+    {
+      buyDex: "Aerodrome",
+      sellDex: "Uniswap",
+      buyPrice: aerodromePrice,
+      sellPrice: uniswapPrice,
+      tradeSizeCbBTC,
+      aerodromeFeeBps: aeroFeeBps,
+    }
+  );
+  
+  return directionA.netProfitUSDC > directionB.netProfitUSDC ? directionA : directionB;
+}
+
+/**
+ * Calculate arbitrage for a specific direction using the new cost model
+ * @param {Object} params - Calculation parameters
+ * @param {string} params.buyDex - DEX where cbBTC is bought
+ * @param {string} params.sellDex - DEX where cbBTC is sold
+ * @param {number} params.buyPrice - Buy price (USDC per cbBTC)
+ * @param {number} params.sellPrice - Sell price (USDC per cbBTC)
+ * @param {number} params.tradeSizeCbBTC - cbBTC trade size
+ * @param {number} params.aerodromeFeeBps - Aerodrome fee in bps (only applied on Aerodrome trades)
+ * @returns {Object} Calculation result
+ */
+function calculateArbDirection({
+  buyDex,
+  sellDex,
+  buyPrice,
+  sellPrice,
+  tradeSizeCbBTC,
+  aerodromeFeeBps,
+}) {
+  // Buy leg
+  const usdcSpentBeforeFee = tradeSizeCbBTC * buyPrice;
+  const usdcSpentAfterFee = buyDex === "Aerodrome"
+    ? usdcSpentBeforeFee * (1 + aerodromeFeeBps / 10_000)
+    : usdcSpentBeforeFee; // Uniswap buy has no trade fee
+  
+  // Sell leg
+  const usdcReceivedBeforeFee = tradeSizeCbBTC * sellPrice;
+  const usdcReceivedAfterFee = sellDex === "Aerodrome"
+    ? applyAerodromeTradeFeeUSDC(usdcReceivedBeforeFee, aerodromeFeeBps)
+    : usdcReceivedBeforeFee; // Uniswap sell has no trade fee
+  
+  // Gas costs
+  const totalGasCostUSDC = totalGasCostForDirection(buyDex, sellDex);
+  
+  // Profit
+  const netUSDC = usdcReceivedAfterFee - totalGasCostUSDC;
+  const netProfitUSDC = netUSDC - usdcSpentAfterFee;
+  const netProfitPct = (netProfitUSDC / usdcSpentAfterFee) * 100;
+  
+  return {
+    isProfitable: netProfitUSDC > 0,
+    netProfitUSDC,
+    netProfitPct,
+    direction: `Buy on ${buyDex}, Sell on ${sellDex}`,
+    buyDex,
+    sellDex,
+    details: {
+      tradeSizeCbBTC,
+      buyPrice,
+      sellPrice,
+      usdcSpentBeforeFee,
+      usdcSpentAfterFee,
+      usdcReceivedBeforeFee,
+      usdcReceivedAfterFee,
+      aerodromeFeeBps,
+      totalGasCostUSDC,
+    },
+  };
+}
+
+/**
+ * Log arbitrage opportunity in a formatted way
+ * @param {Object} arbResult - Result from simulateArbitrage()
+ */
+function logArbitrageOpportunity(arbResult) {
+  const d = arbResult.details;
+  
+  const aeroFeeApplied = d.aerodromeFeeBps > 0;
+  const aeroFeeLabel = `${d.aerodromeFeeBps} bps`;
+  const totalFees = d.usdcSpentAfterFee - d.usdcSpentBeforeFee + (d.usdcReceivedBeforeFee - d.usdcReceivedAfterFee);
+  const spread = d.usdcReceivedBeforeFee - d.usdcSpentBeforeFee;
+  
+  if (!arbResult.isProfitable) {
+    console.log(`💤 Not profitable after fees/gas (best: ${arbResult.direction}, net: $${arbResult.netProfitUSDC.toFixed(2)})`);
+    console.log(`   📊 Spread: $${spread.toFixed(2)} | Fees: $${totalFees.toFixed(4)} | Gas: $${d.totalGasCostUSDC.toFixed(4)} | Net: $${arbResult.netProfitUSDC.toFixed(2)}`);
+    return;
+  }
+  
+  console.log("\n" + "═".repeat(80));
+  console.log("💰 PROFITABLE ARBITRAGE OPPORTUNITY DETECTED!");
+  console.log("═".repeat(80));
+  console.log(`📍 Direction: ${arbResult.direction}`);
+  console.log(`📊 Trade Size: ${d.tradeSizeCbBTC} cbBTC`);
+  console.log(`💵 Net Profit: $${arbResult.netProfitUSDC.toFixed(2)} USDC (${arbResult.netProfitPct.toFixed(3)}%)`);
+  console.log();
+  console.log("📋 BUY LEG - " + arbResult.buyDex + ":");
+  console.log(`   Price: $${d.buyPrice.toFixed(2)} per cbBTC`);
+  console.log(`   Cost before fee: $${d.usdcSpentBeforeFee.toFixed(2)}`);
+  if (arbResult.buyDex === "Aerodrome" && aeroFeeApplied) {
+    console.log(`   Aerodrome Fee: ${aeroFeeLabel}`);
+  }
+  console.log(`   ✅ Total USDC Spent: $${d.usdcSpentAfterFee.toFixed(2)}`);
+  console.log();
+  console.log("📋 SELL LEG - " + arbResult.sellDex + ":");
+  console.log(`   Price: $${d.sellPrice.toFixed(2)} per cbBTC`);
+  console.log(`   Revenue before fee: $${d.usdcReceivedBeforeFee.toFixed(2)}`);
+  if (arbResult.sellDex === "Aerodrome" && aeroFeeApplied) {
+    console.log(`   Aerodrome Fee: ${aeroFeeLabel}`);
+  }
+  console.log(`   ✅ Total USDC Received: $${d.usdcReceivedAfterFee.toFixed(2)}`);
+  console.log();
+  console.log("📋 SUMMARY:");
+  console.log(`   Gross Spread: $${spread.toFixed(2)}`);
+  console.log(`   Total Fees: $${totalFees.toFixed(4)}`);
+  console.log(`   Gas: $${d.totalGasCostUSDC.toFixed(4)}`);
+  console.log(`   Net Profit: $${arbResult.netProfitUSDC.toFixed(2)}`);
+  console.log("═".repeat(80) + "\n");
+}
+
 // ===== MAIN MONITORING LOGIC =====
 async function monitorPool() {
   console.log("🚀 Starting Dual DEX cbBTC/USDC Price Monitor on Base");
@@ -223,6 +400,11 @@ async function monitorPool() {
     const initialSpread = calculateSpread(lastAerodromePrice, lastUniswapPrice);
     console.log(`📊 Initial Spread (Aerodrome vs Uniswap): ${formatSpread(initialSpread)}\n`);
     
+    // Simulate initial arbitrage opportunity
+    console.log("🔍 Checking initial arbitrage opportunity...");
+    const initialArbResult = simulateArbitrage(lastUniswapPrice, lastAerodromePrice);
+    logArbitrageOpportunity(initialArbResult);
+    
     console.log("=".repeat(80));
     console.log("👀 MONITORING STARTED - Listening for price changes...");
     console.log("=".repeat(80));
@@ -249,6 +431,10 @@ async function monitorPool() {
           console.log("─".repeat(80));
           
           lastUniswapPrice = newPrice;
+          
+          // Simulate arbitrage opportunity
+          const arbResult = simulateArbitrage(newPrice, lastAerodromePrice);
+          logArbitrageOpportunity(arbResult);
         }
       } catch (error) {
         console.error("❌ Error processing Uniswap swap event:", error.message);
@@ -279,6 +465,10 @@ async function monitorPool() {
           console.log("─".repeat(80));
           
           lastAerodromePrice = newPrice;
+          
+          // Simulate arbitrage opportunity
+          const arbResult = simulateArbitrage(lastUniswapPrice, newPrice);
+          logArbitrageOpportunity(arbResult);
         }
       } catch (error) {
         console.error("❌ Error processing Aerodrome swap event:", error.message);
