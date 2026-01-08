@@ -146,6 +146,16 @@ function formatSpread(spread) {
 // ===== FEE & GAS HELPERS =====
 
 /**
+ * Calculate USDC trade size from overall budget and percentage allocation
+ * @param {number} overallBudgetUSDC - Total arbitrage budget in USDC
+ * @param {number} budgetPercent - Percentage of budget to use per trade (0-100)
+ * @returns {number} Trade size in USDC
+ */
+function getArbTradeSizeUSDC(overallBudgetUSDC, budgetPercent) {
+  return overallBudgetUSDC * (budgetPercent / 100);
+}
+
+/**
  * Get fee and gas information for a DEX
  * @param {string} dexName - DEX name ("Uniswap", "Aerodrome", "PancakeSwap")
  * @returns {Object} { feeBps, gasFeeUSDC } or { fixedFeeUSDC, gasFeeUSDC } for PancakeSwap
@@ -194,27 +204,38 @@ function totalGasCostForDirection(buyDex, sellDex) {
  * @param {number} dex1Price - cbBTC price on DEX1 (USDC per cbBTC)
  * @param {string} dex2Name - Second DEX
  * @param {number} dex2Price - cbBTC price on DEX2 (USDC per cbBTC)
- * @returns {Object} Best arbitrage direction
+ * @param {number} currentBudgetUSDC - Current overall budget (may have compounded from previous trades)
+ * @param {number} budgetPct - Percentage of budget to use per trade
+ * @returns {Object} Best arbitrage direction with budget info
  */
-function simulateArbitrageForPair(dex1Name, dex1Price, dex2Name, dex2Price) {
-  const tradeSizeCbBTC = config.arbitrage.tradeSizeCbBTC;
+function simulateArbitrageForPair(dex1Name, dex1Price, dex2Name, dex2Price, currentBudgetUSDC, budgetPct) {
+  // Calculate USDC trade size from current budget percentage
+  const tradeSizeUSDC = getArbTradeSizeUSDC(currentBudgetUSDC, budgetPct);
   
   // Direction A: Buy on DEX1, Sell on DEX2
+  // Convert USDC to cbBTC using DEX1's price (where we buy)
+  const tradeSizeCbBTC_A = tradeSizeUSDC / dex1Price;
   const directionA = calculateArbDirection({
     buyDex: dex1Name,
     sellDex: dex2Name,
     buyPrice: dex1Price,
     sellPrice: dex2Price,
-    tradeSizeCbBTC,
+    tradeSizeCbBTC: tradeSizeCbBTC_A,
+    tradeSizeUSDC,
+    currentBudgetUSDC,
   });
   
   // Direction B: Buy on DEX2, Sell on DEX1
+  // Convert USDC to cbBTC using DEX2's price (where we buy)
+  const tradeSizeCbBTC_B = tradeSizeUSDC / dex2Price;
   const directionB = calculateArbDirection({
     buyDex: dex2Name,
     sellDex: dex1Name,
     buyPrice: dex2Price,
     sellPrice: dex1Price,
-    tradeSizeCbBTC,
+    tradeSizeCbBTC: tradeSizeCbBTC_B,
+    tradeSizeUSDC,
+    currentBudgetUSDC,
   });
   
   return directionA.netProfitUSDC > directionB.netProfitUSDC ? directionA : directionB;
@@ -228,6 +249,8 @@ function simulateArbitrageForPair(dex1Name, dex1Price, dex2Name, dex2Price) {
  * @param {number} params.buyPrice - Buy price (USDC per cbBTC)
  * @param {number} params.sellPrice - Sell price (USDC per cbBTC)
  * @param {number} params.tradeSizeCbBTC - cbBTC trade size
+ * @param {number} params.tradeSizeUSDC - USDC trade size (for logging)
+ * @param {number} params.currentBudgetUSDC - Current overall budget (for tracking compounding)
  * @returns {Object} Calculation result
  */
 function calculateArbDirection({
@@ -236,6 +259,8 @@ function calculateArbDirection({
   buyPrice,
   sellPrice,
   tradeSizeCbBTC,
+  tradeSizeUSDC,
+  currentBudgetUSDC,
 }) {
   const buyModel = getDexCostModel(buyDex);
   const sellModel = getDexCostModel(sellDex);
@@ -286,6 +311,8 @@ function calculateArbDirection({
     buyDex,
     sellDex,
     details: {
+      currentBudgetUSDC,
+      tradeSizeUSDC,
       tradeSizeCbBTC,
       buyPrice,
       sellPrice,
@@ -305,11 +332,12 @@ function calculateArbDirection({
 }
 
 /**
- * Log arbitrage opportunity in a formatted way
+ * Log arbitrage opportunity in a formatted way with budget compounding
  * @param {Object} arbResult - Result from calculateArbDirection()
  */
 function logArbitrageOpportunity(arbResult) {
   const d = arbResult.details;
+  const newBudgetUSDC = d.currentBudgetUSDC + arbResult.netProfitUSDC;
   
   // Build fee labels for both buy and sell legs
   let buyFeeLabel = "";
@@ -339,7 +367,7 @@ function logArbitrageOpportunity(arbResult) {
   console.log("💰 PROFITABLE ARBITRAGE OPPORTUNITY DETECTED!");
   console.log("═".repeat(80));
   console.log(`📍 Direction: ${arbResult.direction}`);
-  console.log(`📊 Trade Size: ${d.tradeSizeCbBTC} cbBTC`);
+  console.log(`📊 Trade Size: $${d.tradeSizeUSDC.toFixed(2)} USDC (${d.tradeSizeCbBTC.toFixed(8)} cbBTC)`);
   console.log(`💵 Net Profit: $${arbResult.netProfitUSDC.toFixed(2)} USDC (${arbResult.netProfitPct.toFixed(3)}%)`);
   console.log();
   console.log("📋 BUY LEG - " + d.buyDexName + ":");
@@ -363,6 +391,11 @@ function logArbitrageOpportunity(arbResult) {
   console.log(`   Total Fees: $${totalFees.toFixed(4)}`);
   console.log(`   Gas: $${d.totalGasCostUSDC.toFixed(4)}`);
   console.log(`   Net Profit: $${arbResult.netProfitUSDC.toFixed(2)}`);
+  console.log();
+  console.log("📊 BUDGET COMPOUNDING:");
+  console.log(`   Previous Budget: $${d.currentBudgetUSDC.toFixed(2)} USDC`);
+  console.log(`   Profit Added: +$${arbResult.netProfitUSDC.toFixed(4)} USDC`);
+  console.log(`   📈 New Budget: $${newBudgetUSDC.toFixed(2)} USDC`);
   console.log("═".repeat(80) + "\n");
 }
 
@@ -370,6 +403,12 @@ function logArbitrageOpportunity(arbResult) {
 async function monitorPool() {
   console.log("🚀 Starting Triple DEX cbBTC/USDC Price Monitor on Base");
   console.log("   📊 Uniswap V3 + Aerodrome Slipstream + PancakeSwap V3\n");
+  
+  // Initialize mutable budget (compounds as trades are simulated as profitable)
+  let overallBudgetUSDC = parseFloat(process.env.ARB_OVERALL_BUDGET_USDC || "0");
+  const budgetPercent = parseFloat(process.env.ARB_BUDGET_PERCENT || "0");
+  
+  console.log(`📊 Initial Budget: $${overallBudgetUSDC.toFixed(2)} USDC (${budgetPercent}% per trade = $${(overallBudgetUSDC * budgetPercent / 100).toFixed(2)} USDC)\n`);
   
   // Connect to Base mainnet using WebSocket for real-time events
   const provider = new ethers.WebSocketProvider(config.rpc.baseWssUrl);
@@ -497,8 +536,12 @@ async function monitorPool() {
     
     // Simulate initial arbitrage for best pair
     console.log("🔍 Checking initial arbitrage opportunity...");
-    const initialArbResult = simulateArbitrageForPair(maxSpreadPair.dex1, maxSpreadPair.price1, maxSpreadPair.dex2, maxSpreadPair.price2);
+    const initialArbResult = simulateArbitrageForPair(maxSpreadPair.dex1, maxSpreadPair.price1, maxSpreadPair.dex2, maxSpreadPair.price2, overallBudgetUSDC, budgetPercent);
     logArbitrageOpportunity(initialArbResult);
+    // Compound budget if profitable
+    if (initialArbResult.isProfitable && initialArbResult.netProfitUSDC > 0) {
+      overallBudgetUSDC += initialArbResult.netProfitUSDC;
+    }
     
     console.log("=".repeat(80));
     console.log("👀 MONITORING STARTED - Listening for price changes...");
@@ -520,9 +563,16 @@ async function monitorPool() {
       
       console.log(`📈 Max spread: ${maxSpreadPair.dex1} vs ${maxSpreadPair.dex2} (${formatSpread(maxSpreadPair.spread)})`);
       
-      // Simulate arbitrage for best pair
-      const arbResult = simulateArbitrageForPair(maxSpreadPair.dex1, maxSpreadPair.price1, maxSpreadPair.dex2, maxSpreadPair.price2);
+      // Simulate arbitrage for best pair with current (potentially compounded) budget
+      const arbResult = simulateArbitrageForPair(maxSpreadPair.dex1, maxSpreadPair.price1, maxSpreadPair.dex2, maxSpreadPair.price2, overallBudgetUSDC, budgetPercent);
       logArbitrageOpportunity(arbResult);
+      
+      // Compound budget if profitable
+      if (arbResult.isProfitable && arbResult.netProfitUSDC > 0) {
+        const previousBudget = overallBudgetUSDC;
+        overallBudgetUSDC += arbResult.netProfitUSDC;
+        console.log(`💰 Budget updated: $${previousBudget.toFixed(2)} + $${arbResult.netProfitUSDC.toFixed(4)} = $${overallBudgetUSDC.toFixed(2)} USDC\n`);
+      }
     };
     
     // ===== UNISWAP V3 EVENT LISTENER =====

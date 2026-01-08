@@ -131,10 +131,16 @@ const config = {
 
   // Arbitrage Simulation Configuration
   arbitrage: {
-    // Trade size for simulation (in cbBTC)
-    tradeSizeCbBTC: parseFloatSafe(
-      getOptionalEnv("ARB_TRADE_SIZE_CBBTC", "0.1"),
-      "ARB_TRADE_SIZE_CBBTC"
+    // Overall USDC budget available for arbitrage trading
+    overallBudgetUSDC: parseFloatSafe(
+      getRequiredEnv("ARB_OVERALL_BUDGET_USDC", "Overall arbitrage budget in USDC"),
+      "ARB_OVERALL_BUDGET_USDC"
+    ),
+    // Percentage of overall budget to deploy per arbitrage attempt (0-100)
+    // Example: 5 means use 5% of the overall budget per trade
+    budgetPercent: parseFloatSafe(
+      getRequiredEnv("ARB_BUDGET_PERCENT", "Percentage of budget per trade"),
+      "ARB_BUDGET_PERCENT"
     ),
   },
 };
@@ -151,7 +157,7 @@ console.log(`   Price Change Threshold: $${config.thresholds.priceChange}`);
 console.log(`   Uniswap Gas Fee: $${config.costs.uniswapGasFeeUSDC} USDC`);
 console.log(`   Aerodrome Gas Fee: $${config.costs.aerodromeGasFeeUSDC} USDC (Fee: ${config.costs.aerodromeFeeBps} bps)`);
 console.log(`   PancakeSwap Gas Fee: $${config.costs.pancakeGasFeeUSDC} USDC (Fixed Fee: $${config.costs.pancakeFixedFeeUSDC} USDC)`);
-console.log(`   Arb Trade Size: ${config.arbitrage.tradeSizeCbBTC} cbBTC`);
+console.log(`   Arb Budget: $${config.arbitrage.overallBudgetUSDC} USDC (${config.arbitrage.budgetPercent}% per trade = $${(config.arbitrage.overallBudgetUSDC * config.arbitrage.budgetPercent / 100).toFixed(2)} USDC)`);
 console.log();
 
 export default config;
