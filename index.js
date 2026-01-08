@@ -1,8 +1,5 @@
 import { ethers } from "ethers";
-import dotenv from "dotenv";
-
-// Load environment variables
-dotenv.config();
+import config from "./config.js";
 
 /**
  * ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -10,9 +7,8 @@ dotenv.config();
  * ║   Monitors cbBTC/USDC pair on both DEXes and calculates spreads             ║
  * ╚══════════════════════════════════════════════════════════════════════════════╝
  * 
- * This script monitors the cbBTC/USDC price on two DEXes on Base:
- * 1. Uniswap V3 Pool: 0xfbb6eed8e7aa03b138556eedaf5d271a5e1e43ef
- * 2. Aerodrome Slipstream Pool: 0x4e962bb3889bf030368f56810a9c96b83cb3e778
+ * This script monitors the cbBTC/USDC price on two DEXes on Base.
+ * All configuration is loaded from environment variables via config.js
  * 
  * Features:
  * - Real-time price monitoring via Swap events on both DEXes
@@ -20,30 +16,15 @@ dotenv.config();
  * - High-precision BigInt calculations for accurate pricing
  * - Spread calculation showing arbitrage opportunities
  * - Formatted logging with timestamps and transaction hashes
+ * - Fully configurable via .env file
  * 
- * Aerodrome Slipstream uses a Uniswap V3-compatible interface with:
- * - slot0() function returning sqrtPriceX96
- * - token0() and token1() for token addresses
- * - Swap event with identical signature to Uniswap V3
+ * Configuration loaded from .env:
+ * - BASE_RPC_URL: RPC endpoint for Base blockchain
+ * - CB_BTC_ADDRESS, USDC_ADDRESS: Token addresses
+ * - CB_BTC_DECIMALS, USDC_DECIMALS: Token decimals
+ * - UNISWAP_POOL_ADDRESS, AERODROME_POOL_ADDRESS: Pool addresses
+ * - PRICE_CHANGE_THRESHOLD: Minimum price change to log
  */
-
-// ===== CONFIGURATION =====
-// Base mainnet RPC URL from environment variable
-const BASE_RPC = process.env.BASE_RPC_URL || "https://base-mainnet.publicnode.com";
-
-// Uniswap V3 cbBTC/USDC pool address on Base
-const UNISWAP_POOL_ADDRESS = "0xfbb6eed8e7aa03b138556eedaf5d271a5e1e43ef";
-
-// Aerodrome Slipstream cbBTC/USDC pool address on Base
-const AERODROME_POOL_ADDRESS = "0x4e962bb3889bf030368f56810a9c96b83cb3e778";
-
-// Token decimals
-const cbBTC_DECIMALS = 8;  // cbBTC decimals (like BTC)
-const USDC_DECIMALS = 6;   // USDC decimals
-
-// Token addresses
-const cbBTC_ADDRESS = "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf";
-const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 
 // ===== UNISWAP V3 POOL ABI =====
 const UNISWAP_POOL_ABI = [
@@ -91,9 +72,9 @@ function calculatePrice(sqrtPriceX96, isInverted) {
     // price = token1/token0 = cbBTC/USDC (in raw units)
     // To get USDC per cbBTC, we need to invert and adjust for decimals
     
-    // Calculate price with decimal adjustment: (sqrtPriceX96^2 * 10^6) / (2^192 * 10^18)
-    const numerator = sqrtPriceX96BigInt * sqrtPriceX96BigInt * (10n ** BigInt(USDC_DECIMALS));
-    const denominator = Q96 * Q96 * (10n ** BigInt(cbBTC_DECIMALS));
+    // Calculate price with decimal adjustment using config values
+    const numerator = sqrtPriceX96BigInt * sqrtPriceX96BigInt * (10n ** BigInt(config.tokens.USDC.decimals));
+    const denominator = Q96 * Q96 * (10n ** BigInt(config.tokens.cbBTC.decimals));
     
     // Convert to number (this gives cbBTC per USDC)
     const cbBTCperUSDC = Number(numerator) / Number(denominator);
@@ -104,8 +85,8 @@ function calculatePrice(sqrtPriceX96, isInverted) {
     // cbBTC is token0, USDC is token1
     // price = token1/token0 = USDC/cbBTC (in raw units)
     
-    const numerator = sqrtPriceX96BigInt * sqrtPriceX96BigInt * (10n ** BigInt(USDC_DECIMALS));
-    const denominator = Q96 * Q96 * (10n ** BigInt(cbBTC_DECIMALS));
+    const numerator = sqrtPriceX96BigInt * sqrtPriceX96BigInt * (10n ** BigInt(config.tokens.USDC.decimals));
+    const denominator = Q96 * Q96 * (10n ** BigInt(config.tokens.cbBTC.decimals));
     
     return Number(numerator) / Number(denominator);
   }
@@ -134,14 +115,14 @@ function calculateAerodromePrice(sqrtPriceX96, isInverted) {
   
   if (isInverted) {
     // cbBTC is token1, USDC is token0
-    const numerator = sqrtPriceX96BigInt * sqrtPriceX96BigInt * (10n ** BigInt(USDC_DECIMALS));
-    const denominator = Q96 * Q96 * (10n ** BigInt(cbBTC_DECIMALS));
+    const numerator = sqrtPriceX96BigInt * sqrtPriceX96BigInt * (10n ** BigInt(config.tokens.USDC.decimals));
+    const denominator = Q96 * Q96 * (10n ** BigInt(config.tokens.cbBTC.decimals));
     const cbBTCperUSDC = Number(numerator) / Number(denominator);
     return 1 / cbBTCperUSDC;
   } else {
     // cbBTC is token0, USDC is token1
-    const numerator = sqrtPriceX96BigInt * sqrtPriceX96BigInt * (10n ** BigInt(USDC_DECIMALS));
-    const denominator = Q96 * Q96 * (10n ** BigInt(cbBTC_DECIMALS));
+    const numerator = sqrtPriceX96BigInt * sqrtPriceX96BigInt * (10n ** BigInt(config.tokens.USDC.decimals));
+    const denominator = Q96 * Q96 * (10n ** BigInt(config.tokens.cbBTC.decimals));
     return Number(numerator) / Number(denominator);
   }
 }
@@ -166,18 +147,18 @@ async function monitorPool() {
   console.log("🚀 Starting Dual DEX cbBTC/USDC Price Monitor on Base");
   console.log("   📊 Uniswap V3 + Aerodrome Slipstream\n");
   
-  // Connect to Base mainnet
-  const provider = new ethers.JsonRpcProvider(BASE_RPC);
-  console.log(`📡 Connected to Base RPC: ${BASE_RPC}\n`);
+  // Connect to Base mainnet using RPC URL from config
+  const provider = new ethers.JsonRpcProvider(config.rpc.baseUrl);
+  console.log(`📡 Connected to Base RPC: ${config.rpc.baseUrl}\n`);
   
   // ===== UNISWAP V3 INITIALIZATION =====
   console.log("=" .repeat(80));
   console.log("🦄 UNISWAP V3 INITIALIZATION");
   console.log("=".repeat(80));
-  console.log(`📍 Pool Address: ${UNISWAP_POOL_ADDRESS}\n`);
+  console.log(`📍 Pool Address: ${config.pools.uniswap.cbBTC_USDC}\n`);
   
-  // Create Uniswap pool contract instance
-  const uniswapPool = new ethers.Contract(UNISWAP_POOL_ADDRESS, UNISWAP_POOL_ABI, provider);
+  // Create Uniswap pool contract instance using address from config
+  const uniswapPool = new ethers.Contract(config.pools.uniswap.cbBTC_USDC, UNISWAP_POOL_ABI, provider);
   
   // Variables to track prices
   let lastUniswapPrice = 0;
@@ -192,8 +173,8 @@ async function monitorPool() {
     const uniToken0 = await uniswapPool.token0();
     const uniToken1 = await uniswapPool.token1();
     
-    // Check if cbBTC is token0 or token1
-    uniswapIsInverted = uniToken0.toLowerCase() === USDC_ADDRESS.toLowerCase();
+    // Check if cbBTC is token0 or token1 using addresses from config
+    uniswapIsInverted = uniToken0.toLowerCase() === config.tokens.USDC.address.toLowerCase();
     
     console.log(`   Token0: ${uniToken0}`);
     console.log(`   Token1: ${uniToken1}`);
@@ -211,18 +192,18 @@ async function monitorPool() {
     console.log("=".repeat(80));
     console.log("🌀 AERODROME SLIPSTREAM INITIALIZATION");
     console.log("=".repeat(80));
-    console.log(`📍 Pool Address: ${AERODROME_POOL_ADDRESS}\n`);
+    console.log(`📍 Pool Address: ${config.pools.aerodrome.cbBTC_USDC}\n`);
     
-    // Create Aerodrome pool contract instance
+    // Create Aerodrome pool contract instance using address from config
     // Using the full ABI from Basescan - Slipstream is Uniswap V3 compatible
-    const aerodromePool = new ethers.Contract(AERODROME_POOL_ADDRESS, AERODROME_POOL_ABI, provider);
+    const aerodromePool = new ethers.Contract(config.pools.aerodrome.cbBTC_USDC, AERODROME_POOL_ABI, provider);
     
     // Detect Aerodrome token ordering
     console.log("🔍 Detecting token ordering...");
     const aeroToken0 = await aerodromePool.token0();
     const aeroToken1 = await aerodromePool.token1();
     
-    aerodromeIsInverted = aeroToken0.toLowerCase() === USDC_ADDRESS.toLowerCase();
+    aerodromeIsInverted = aeroToken0.toLowerCase() === config.tokens.USDC.address.toLowerCase();
     
     console.log(`   Token0: ${aeroToken0}`);
     console.log(`   Token1: ${aeroToken1}`);
@@ -254,8 +235,8 @@ async function monitorPool() {
         const slot0 = await uniswapPool.slot0();
         const newPrice = calculatePrice(slot0.sqrtPriceX96, uniswapIsInverted);
         
-        // Only log if price changed significantly
-        if (Math.abs(newPrice - lastUniswapPrice) > 0.01) {
+        // Only log if price changed significantly (threshold from config)
+        if (Math.abs(newPrice - lastUniswapPrice) > config.thresholds.priceChange) {
           const priceChange = ((newPrice - lastUniswapPrice) / lastUniswapPrice) * 100;
           const changeSymbol = priceChange >= 0 ? "📈" : "📉";
           const spread = calculateSpread(lastAerodromePrice, newPrice);
@@ -284,8 +265,8 @@ async function monitorPool() {
         // Extract sqrtPriceX96 from the slot0 return structure
         const newPrice = calculateAerodromePrice(slot0.sqrtPriceX96, aerodromeIsInverted);
         
-        // Only log if price changed significantly
-        if (Math.abs(newPrice - lastAerodromePrice) > 0.01) {
+        // Only log if price changed significantly (threshold from config)
+        if (Math.abs(newPrice - lastAerodromePrice) > config.thresholds.priceChange) {
           const priceChange = ((newPrice - lastAerodromePrice) / lastAerodromePrice) * 100;
           const changeSymbol = priceChange >= 0 ? "📈" : "📉";
           const spread = calculateSpread(newPrice, lastUniswapPrice);
